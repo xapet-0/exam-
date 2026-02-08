@@ -1,113 +1,106 @@
-from datetime import date
-import json
-from pathlib import Path
+from __future__ import annotations
+
+import sys
+import termios
+import tty
+from typing import List, Optional
 
 from rich.console import Console
+from rich.live import Live
 from rich.prompt import Prompt
+from rich.table import Table
+from rich.text import Text
 
-from modules.gate_loader import load_gates
-from modules.interface import build_hud
-from system_utils import (
-    calculate_level,
-    load_daily_state,
-    play_level_up_animation,
-    run_command,
-    run_penalty_quest,
-    save_daily_state,
-)
+from modules.dungeon_master import enter_dungeon
+from modules.gate_scanner import scan_subjects
 
 CONSOLE = Console()
-PLAYER_STATE_PATH = Path("data/player_state.json")
-
-DEFAULT_DAILY_QUESTS = [
-    {"name": "Physical: 20m workout", "completed": False},
-    {"name": "Mental: 10m meditation", "completed": False},
-    {"name": "Coding: 45m focused session", "completed": False},
-]
 
 
-def load_player_state() -> dict:
-    if PLAYER_STATE_PATH.exists():
-        return json.loads(PLAYER_STATE_PATH.read_text(encoding="utf-8"))
-    return {"xp": 0, "fatigue": 0, "gold": 0}
+def build_dungeon_table(dungeons: List[dict], selected_index: int) -> Table:
+    table = Table(title="SOLO LEVELING // DUNGEON LIST", header_style="bold cyan")
+    table.add_column("ID", style="cyan", justify="right", width=4)
+    table.add_column("Rank/Exam", style="bright_magenta")
+    table.add_column("Name", style="white")
+    table.add_column("Status", style="bright_green")
+
+    if not dungeons:
+        table.add_row("-", "-", "No dungeons discovered", "-")
+        return table
+
+    for idx, dungeon in enumerate(dungeons, start=1):
+        status = "Ready" if dungeon["has_tester"] else "Missing tester"
+        row_style = "bold yellow" if idx - 1 == selected_index else ""
+        table.add_row(
+            str(idx),
+            str(dungeon["level"]),
+            str(dungeon["name"]),
+            status,
+            style=row_style,
+        )
+    return table
 
 
-def save_player_state(state: dict) -> None:
-    PLAYER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PLAYER_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+def _read_key() -> str:
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        first = sys.stdin.read(1)
+        if first == "\x1b":
+            second = sys.stdin.read(1)
+            third = sys.stdin.read(1)
+            return first + second + third
+        return first
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def refresh_daily_quests() -> list:
-    state = load_daily_state()
-    today = date.today().isoformat()
-    if state["date"] != today:
-        incomplete = [q for q in state.get("quests", []) if not q.get("completed")]
-        if state["date"] is not None and incomplete:
-            run_penalty_quest()
-        state = {"date": today, "quests": [dict(q) for q in DEFAULT_DAILY_QUESTS]}
-        save_daily_state(state)
-    return state["quests"]
+def select_dungeon(dungeons: List[dict]) -> Optional[dict]:
+    if not dungeons:
+        return None
 
+    if not sys.stdin.isatty():
+        choice = Prompt.ask("Select dungeon by ID", default="1")
+        if not choice.isdigit():
+            return None
+        index = int(choice) - 1
+        if 0 <= index < len(dungeons):
+            return dungeons[index]
+        return None
 
-def toggle_daily_quest(quests: list) -> None:
-    CONSOLE.print("\nDaily Quests:")
-    for index, quest in enumerate(quests, start=1):
-        status = "[x]" if quest["completed"] else "[ ]"
-        CONSOLE.print(f" {index}. {status} {quest['name']}")
+    index = 0
+    CONSOLE.print(Text("Use ↑/↓ to move, Enter to select, or type an ID.", style="bright_cyan"))
 
-    choice = Prompt.ask("Toggle which quest? (number)", default="0")
-    if not choice.isdigit():
-        return
-    selection = int(choice)
-    if 1 <= selection <= len(quests):
-        quests[selection - 1]["completed"] = not quests[selection - 1]["completed"]
-        save_daily_state({"date": date.today().isoformat(), "quests": quests})
+    with Live(build_dungeon_table(dungeons, index), console=CONSOLE, refresh_per_second=10) as live:
+        while True:
+            key = _read_key()
+            if key in {"\x1b[A", "k"}:
+                index = (index - 1) % len(dungeons)
+            elif key in {"\x1b[B", "j"}:
+                index = (index + 1) % len(dungeons)
+            elif key == "\r":
+                return dungeons[index]
+            elif key.isdigit():
+                digit_index = int(key) - 1
+                if 0 <= digit_index < len(dungeons):
+                    return dungeons[digit_index]
+            elif key in {"q", "Q"}:
+                return None
+            live.update(build_dungeon_table(dungeons, index))
 
 
 def main() -> None:
-    gates = load_gates()
-    player_state = load_player_state()
-    daily_quests = refresh_daily_quests()
-
-    while True:
-        level_info = calculate_level(player_state["xp"])
-        stats = {
-            "level": level_info["level"],
-            "next_level_xp": level_info["next_level_xp"],
-            "xp": player_state["xp"],
-            "fatigue": player_state["fatigue"],
-            "gold": player_state["gold"],
-        }
-
-        CONSOLE.clear()
-        CONSOLE.print(build_hud(gates, stats, daily_quests))
-        choice = Prompt.ask("Action").strip().lower()
-
-        if choice in {"q", "quit", "exit"}:
-            save_player_state(player_state)
-            break
-        if choice in {"d", "daily"}:
-            toggle_daily_quest(daily_quests)
-            continue
-        if not choice.isdigit():
-            continue
-
-        gate_index = int(choice) - 1
-        if gate_index < 0 or gate_index >= len(gates):
-            continue
-
-        gate = gates[gate_index]
-        before_level = level_info["level"]
-        exit_code = run_command(gate.command)
-        if exit_code == 0:
-            player_state["xp"] += gate.xp_reward
-            player_state["gold"] += gate.xp_reward // 10
-            player_state["fatigue"] += 5
-
-            new_level = calculate_level(player_state["xp"])["level"]
-            if new_level > before_level:
-                play_level_up_animation(new_level)
-        save_player_state(player_state)
+    dungeons = scan_subjects()
+    selected = select_dungeon(dungeons)
+    if not selected:
+        CONSOLE.print("[bold red]No dungeon selected. Exiting.[/]")
+        return
+    exit_code = enter_dungeon(selected["path"])
+    if exit_code == 0:
+        CONSOLE.print("[bold green]Dungeon clear![/]")
+    else:
+        CONSOLE.print("[bold red]Dungeon failed. Check the output above.[/]")
 
 
 if __name__ == "__main__":
