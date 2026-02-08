@@ -1,0 +1,23 @@
+[
+  {
+    "id": "gate_01",
+    "name": "Libft - The Beginning",
+    "rank": "E",
+    "command": "./exercises/libft_grader.sh",
+    "xp_reward": 120
+  },
+  {
+    "id": "gate_02",
+    "name": "Shell Sentinel",
+    "rank": "D",
+    "command": "./exercises/shell_sentinel.sh",
+    "xp_reward": 180
+  },
+  {
+    "id": "gate_03",
+    "name": "Python Cipher Drill",
+    "rank": "C",
+    "command": "python3 ./exercises/python_cipher_drill.py",
+    "xp_reward": 240
+  }
+]
